@@ -31,35 +31,44 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile=false
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build frontend
         run: pnpm run build
 
-      - name: Assemble plugin package
+      - name: Assemble Decky distribution ZIP
+        shell: bash
         run: |
-          set -eux
+          set -euo pipefail
+          rm -rf release
           mkdir -p release/DeckMicToggle
           cp -r dist release/DeckMicToggle/
-          cp main.py plugin.json README.md LICENSE release/DeckMicToggle/
-          echo "Build contents:"
+          cp main.py package.json plugin.json README.md LICENSE release/DeckMicToggle/
+          test -f release/DeckMicToggle/dist/index.js
+          test -f release/DeckMicToggle/main.py
+          test -f release/DeckMicToggle/package.json
+          test -f release/DeckMicToggle/plugin.json
+          test -f release/DeckMicToggle/LICENSE
+          echo "Distribution contents:"
           find release/DeckMicToggle -maxdepth 2 -type f -print
 
       - name: Create installable ZIP
+        shell: bash
         run: |
+          set -euo pipefail
           cd release
-          zip -r ../DeckMicToggle.zip DeckMicToggle
+          zip -r "../DeckMicToggle-${GITHUB_REF_NAME:-manual}.zip" DeckMicToggle
 
-      - name: Upload build artifact
+      - name: Upload installable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DeckMicToggle
-          path: DeckMicToggle.zip
+          name: DeckMicToggle-installable
+          path: DeckMicToggle-*.zip
           if-no-files-found: error
 
       - name: Create GitHub release for version tag
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: DeckMicToggle.zip
+          files: DeckMicToggle-*.zip
           generate_release_notes: true
