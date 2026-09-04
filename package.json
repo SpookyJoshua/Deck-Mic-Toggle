@@ -1,7 +1,19 @@
 {
   "name": "deck-mic-toggle",
-  "version": "1.0.3",
-  "description": "Decky Loader plugin for muting the Steam Deck built-in microphone",
+  "version": "1.0.4",
+  "description": "Quickly mute or unmute the Steam Deck's built-in microphone from the Quick Access Menu.",
+  "homepage": "https://github.com/SpookyJoshua/Deck-Mic-Toggle",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SpookyJoshua/Deck-Mic-Toggle.git"
+  },
+  "keywords": [
+    "decky-loader",
+    "steam-deck",
+    "microphone",
+    "audio",
+    "utility"
+  ],
   "type": "module",
   "scripts": {
     "build": "rollup -c",
