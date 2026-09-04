@@ -1,6 +1,7 @@
 {
   "name": "Deck Mic Toggle",
   "author": "Josh",
+  "version": "1.0.3",
   "flags": [],
   "api_version": 1,
   "publish": {
