@@ -12,9 +12,10 @@ class Plugin:
     """
     Decky backend for muting/unmuting the Steam Deck's built-in microphone.
 
-    We deliberately use pactl's source mute operation instead of disabling the
-    kernel device. This keeps the audio hardware intact and only changes the
-    microphone's current PipeWire/PulseAudio mute state.
+    SteamOS uses PipeWire's PulseAudio compatibility server for pactl. Decky
+    can be launched with an environment that does not contain the user's
+    PulseAudio/PipeWire socket variables, so pactl must be pointed explicitly
+    at the Steam Deck user's runtime socket.
     """
 
     SETTINGS_FILE = os.path.join(
@@ -22,12 +23,11 @@ class Plugin:
         "settings.json",
     )
 
-    # Steam Deck internal microphones normally appear as an ALSA PCI source.
-    # We require "pci" + "input" and prefer the known Deck audio naming.
+    # Steam Deck internal microphones are exposed as ALSA PCI input sources.
+    # These patterns intentionally prefer PCI sources over USB/Bluetooth inputs.
     INTERNAL_SOURCE_PATTERNS = (
         re.compile(r"^alsa_input\.pci-.*\.analog-stereo$"),
-        re.compile(r"^alsa_input\.pci-.*acp5x.*source$"),
-        re.compile(r"^alsa_input\.pci-.*HiFi__Mic__source$"),
+        re.compile(r"^alsa_input\.pci-.*source$"),
     )
 
     def __init__(self) -> None:
@@ -67,12 +67,26 @@ class Plugin:
         except Exception as exc:
             decky.logger.warning(f"Could not save settings: {exc}")
 
+    def _pactl_environment(self) -> Dict[str, str]:
+        """
+        Return an environment that reliably points pactl at SteamOS's
+        per-user PipeWire PulseAudio compatibility socket.
+
+        Decky normally runs as the `deck` user (UID 1000), but using UID 1000
+        explicitly also handles cases where the parent process has a stripped
+        environment.
+        """
+        environment = os.environ.copy()
+        environment["XDG_RUNTIME_DIR"] = "/run/user/1000"
+        environment["PULSE_RUNTIME_PATH"] = "/run/user/1000/pulse"
+        environment["PULSE_SERVER"] = "unix:/run/user/1000/pulse/native"
+        return environment
+
     def _run_pactl(self, *arguments: str) -> str:
         """
-        Run pactl without invoking a shell.
+        Run pactl against the Steam Deck user's PipeWire PulseAudio socket.
 
-        This avoids shell interpretation and means source names are passed as
-        literal arguments.
+        No shell is used, so source names are passed as literal arguments.
         """
         result = subprocess.run(
             ["pactl", *arguments],
@@ -81,6 +95,7 @@ class Plugin:
             text=True,
             check=False,
             timeout=5,
+            env=self._pactl_environment(),
         )
 
         if result.returncode != 0:
@@ -91,13 +106,10 @@ class Plugin:
 
     def _parse_sources(self, output: str) -> List[Dict[str, str]]:
         """
-        Parse:
-            pactl list sources short
+        Parse `pactl list sources short` output.
 
         Expected format:
             ID NAME DRIVER FORMAT STATE
-
-        The NAME field is the second whitespace-delimited field.
         """
         sources: List[Dict[str, str]] = []
 
@@ -111,11 +123,8 @@ class Plugin:
             if len(parts) < 2:
                 continue
 
-            try:
-                source_id = parts[0]
-                name = parts[1]
-            except IndexError:
-                continue
+            source_id = parts[0]
+            name = parts[1]
 
             if not source_id.isdigit():
                 continue
@@ -137,20 +146,11 @@ class Plugin:
         output = self._run_pactl("list", "sources", "short")
         sources = self._parse_sources(output)
 
-        # First pass: known Steam Deck internal ALSA/PCI source patterns.
+        # Prefer the normal Steam Deck internal ALSA PCI input.
         for source in sources:
-            if self._looks_like_internal_mic(source["name"]):
-                return source["name"]
-
-        # Second pass: the source used by recent Steam Deck PipeWire setups.
-        for source in sources:
-            name = source["name"].lower()
-            if (
-                name.startswith("alsa_input.pci-")
-                and "input" in name
-                and "monitor" not in name
-            ):
-                return source["name"]
+            name = source["name"]
+            if self._looks_like_internal_mic(name):
+                return name
 
         return None
 
@@ -173,9 +173,7 @@ class Plugin:
         raise RuntimeError(f"Unexpected pactl mute response: {output}")
 
     async def get_status(self) -> Dict[str, Any]:
-        """
-        Return the current internal microphone and mute state.
-        """
+        """Return the current internal microphone and mute state."""
         async with self._lock:
             try:
                 source = self._selected_source
@@ -212,9 +210,7 @@ class Plugin:
                 }
 
     async def set_muted(self, muted: bool) -> Dict[str, Any]:
-        """
-        Set the mute state of the Steam Deck's internal microphone.
-        """
+        """Set the mute state of the Steam Deck's internal microphone."""
         async with self._lock:
             try:
                 source = self._selected_source
@@ -226,6 +222,7 @@ class Plugin:
                     return {
                         "success": False,
                         "error": "Could not find the Steam Deck internal microphone.",
+                        "source": None,
                         "muted": None,
                     }
 
@@ -251,13 +248,12 @@ class Plugin:
                 return {
                     "success": False,
                     "error": str(exc),
+                    "source": self._selected_source,
                     "muted": None,
                 }
 
     async def refresh(self) -> Dict[str, Any]:
-        """
-        Forget the cached source and detect the internal microphone again.
-        """
+        """Forget the cached source and detect the internal microphone again."""
         async with self._lock:
             self._selected_source = None
 
