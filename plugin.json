@@ -1,12 +1,12 @@
 {
   "name": "Deck Mic Toggle",
   "author": "Josh",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "flags": [],
   "api_version": 1,
   "publish": {
     "tags": ["audio", "microphone", "utility"],
-    "description": "Quickly mute or unmute the Steam Deck's built-in microphone.",
-    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/decky-plugin-template"
+    "description": "Quickly mute or unmute the Steam Deck's built-in microphone from the Quick Access Menu.",
+    "image": "https://raw.githubusercontent.com/SpookyJoshua/Deck-Mic-Toggle/main/assets/deck-mic-toggle.svg"
   }
 }
