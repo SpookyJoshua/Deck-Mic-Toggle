@@ -14,11 +14,14 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { FaMicrophone, FaMicrophoneSlash, FaSyncAlt } from "react-icons/fa";
 
+const PLUGIN_VERSION = "1.0.3";
+
 interface MicStatus {
   success: boolean;
   error: string | null;
   source: string | null;
   muted: boolean | null;
+  version?: string;
 }
 
 const getStatus = callable<[], MicStatus>("get_status");
@@ -35,12 +38,12 @@ function Content() {
       setStatus(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-
       setStatus({
         success: false,
         error: message,
         source: null,
         muted: null,
+        version: PLUGIN_VERSION,
       });
     }
   }, []);
@@ -55,11 +58,9 @@ function Content() {
     }
 
     setBusy(true);
-
     try {
       const result = await setMuted(!status.muted);
       setStatus(result);
-
       if (result.success) {
         toaster.toast({
           title: result.muted ? "Microphone muted" : "Microphone unmuted",
@@ -89,15 +90,13 @@ function Content() {
     }
 
     setBusy(true);
-
     try {
       const result = await refresh();
       setStatus(result);
-
       if (!result.success) {
         toaster.toast({
           title: "Microphone not found",
-          body: result.error ?? "Could not find the internal microphone.",
+          body: result.error ?? "Could not find a microphone input.",
         });
       }
     } catch (error) {
@@ -135,12 +134,7 @@ function Content() {
               fontWeight: 600,
             }}
           >
-            {status?.muted === true ? (
-              <FaMicrophoneSlash />
-            ) : (
-              <FaMicrophone />
-            )}
-
+            {status?.muted === true ? <FaMicrophoneSlash /> : <FaMicrophone />}
             <span>Microphone: {stateText}</span>
           </div>
         </PanelSectionRow>
@@ -172,7 +166,7 @@ function Content() {
               wordBreak: "break-all",
             }}
           >
-            {status?.source ?? "No internal microphone detected"}
+            {status?.source ?? "No microphone input detected"}
           </div>
         </PanelSectionRow>
 
@@ -205,6 +199,14 @@ function Content() {
           </PanelSectionRow>
         </PanelSection>
       )}
+
+      <PanelSection>
+        <PanelSectionRow>
+          <div style={{ fontSize: "11px", opacity: 0.5, textAlign: "center" }}>
+            Deck Mic Toggle v{PLUGIN_VERSION}
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
     </>
   );
 }
