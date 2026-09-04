@@ -9,34 +9,11 @@ import decky
 
 
 class Plugin:
-    """Decky backend for muting/unmuting the Steam Deck's internal microphone."""
+    VERSION = "1.0.3"
 
     SETTINGS_FILE = os.path.join(
         decky.DECKY_PLUGIN_SETTINGS_DIR,
         "settings.json",
-    )
-
-    # Steam Deck models expose their internal microphone through different
-    # ALSA/UCM device names. In particular, OLED devices commonly expose a
-    # nau8821 source that does NOT end in .analog-stereo.
-    INTERNAL_NAME_PATTERNS = (
-        re.compile(r"^alsa_input\.pci-.*source$", re.IGNORECASE),
-        re.compile(r"^alsa_input\.pci-.*\.analog-stereo$", re.IGNORECASE),
-    )
-
-    INTERNAL_DESCRIPTION_TERMS = (
-        "internal microphone",
-        "internal mic",
-        "headset microphone + internal microphone",
-        "headset mic + internal microphone",
-    )
-
-    INTERNAL_DEVICE_TERMS = (
-        "nau8821",
-        "acp5x",
-        "acp3x",
-        "acp6x",
-        "acp_mach",
     )
 
     def __init__(self) -> None:
@@ -44,7 +21,7 @@ class Plugin:
         self._lock = asyncio.Lock()
 
     async def _main(self) -> None:
-        decky.logger.info("Deck Mic Toggle starting")
+        decky.logger.info(f"Deck Mic Toggle v{self.VERSION} starting")
         self._selected_source = self._load_selected_source()
 
     async def _unload(self) -> None:
@@ -57,10 +34,8 @@ class Plugin:
         try:
             if not os.path.exists(self.SETTINGS_FILE):
                 return None
-
             with open(self.SETTINGS_FILE, "r", encoding="utf-8") as file:
                 data = json.load(file)
-
             source = data.get("selected_source")
             return source if isinstance(source, str) and source else None
         except Exception as exc:
@@ -70,32 +45,30 @@ class Plugin:
     def _save_selected_source(self, source: str) -> None:
         try:
             os.makedirs(os.path.dirname(self.SETTINGS_FILE), exist_ok=True)
-
             with open(self.SETTINGS_FILE, "w", encoding="utf-8") as file:
                 json.dump({"selected_source": source}, file, indent=2)
         except Exception as exc:
             decky.logger.warning(f"Could not save settings: {exc}")
 
     def _pactl_environment(self) -> Dict[str, str]:
-        """Build a PipeWire PulseAudio environment for the Deck user."""
         environment = os.environ.copy()
+        runtime_dir = environment.get("XDG_RUNTIME_DIR", "/run/user/1000")
+        pulse_runtime = os.path.join(runtime_dir, "pulse")
 
-        # Decky normally runs as the deck user. Derive the UID where possible
-        # rather than assuming a particular username, while retaining 1000 as
-        # the normal Steam Deck fallback.
-        uid = str(os.getuid())
-        if uid == "0":
-            uid = "1000"
-
-        runtime_dir = f"/run/user/{uid}"
         environment["XDG_RUNTIME_DIR"] = runtime_dir
-        environment["PULSE_RUNTIME_PATH"] = f"{runtime_dir}/pulse"
-        environment["PULSE_SERVER"] = f"unix:{runtime_dir}/pulse/native"
+        environment["PULSE_RUNTIME_PATH"] = pulse_runtime
+
+        # If the normal socket exists, explicitly select it. Otherwise let
+        # libpulse perform its normal per-user discovery.
+        native_socket = os.path.join(pulse_runtime, "native")
+        if os.path.exists(native_socket):
+            environment["PULSE_SERVER"] = f"unix:{native_socket}"
+        else:
+            environment.pop("PULSE_SERVER", None)
 
         return environment
 
     def _run_pactl(self, *arguments: str) -> str:
-        """Run pactl without invoking a shell."""
         result = subprocess.run(
             ["pactl", *arguments],
             stdout=subprocess.PIPE,
@@ -112,152 +85,111 @@ class Plugin:
 
         return result.stdout
 
-    def _parse_sources_short(self, output: str) -> List[Dict[str, str]]:
-        """Parse `pactl list sources short` output."""
+    def _parse_sources(self, output: str) -> List[Dict[str, str]]:
         sources: List[Dict[str, str]] = []
-
         for line in output.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-
-            parts = line.split()
+            parts = line.strip().split()
             if len(parts) < 2 or not parts[0].isdigit():
                 continue
-
-            sources.append({
-                "id": parts[0],
-                "name": parts[1],
-            })
-
+            sources.append({"id": parts[0], "name": parts[1]})
         return sources
 
-    def _parse_sources_json(self, output: str) -> List[Dict[str, Any]]:
-        """Parse PipeWire's PulseAudio-compatible JSON source listing."""
-        try:
-            data = json.loads(output)
-        except json.JSONDecodeError as exc:
-            decky.logger.warning(f"Could not parse pactl JSON: {exc}")
-            return []
-
-        if isinstance(data, dict):
-            items = data.get("sources", [])
-        else:
-            items = []
-
-        return items if isinstance(items, list) else []
-
-    def _looks_like_internal_mic(self, source: Dict[str, Any]) -> bool:
-        name = str(source.get("name", ""))
-        description = str(source.get("description", ""))
-        properties = source.get("properties", {})
-
-        if not isinstance(properties, dict):
-            properties = {}
-
-        device_name = str(properties.get("device.name", ""))
-        device_description = str(properties.get("device.description", ""))
-        media_class = str(properties.get("media.class", ""))
-
-        combined = " ".join(
-            value.lower()
-            for value in (
-                name,
-                description,
-                device_name,
-                device_description,
-            )
+    def _source_is_candidate(self, name: str) -> bool:
+        lower = name.lower()
+        if "monitor" in lower:
+            return False
+        return (
+            lower.startswith("alsa_input.")
+            or lower.startswith("alsa_input_")
+            or "input" in lower
         )
 
-        # Never select a monitor source: it represents output audio, not a mic.
-        if "monitor" in name.lower() or "monitor" in media_class.lower():
-            return False
+    def _candidate_score(self, name: str) -> int:
+        lower = name.lower()
+        score = 0
 
-        # The strongest signal is an explicit description containing
-        # "Internal Microphone". This covers both OLED and LCD configurations.
-        if any(term in combined for term in self.INTERNAL_DESCRIPTION_TERMS):
-            return True
+        # Strong indicators for the Steam Deck's internal microphone.
+        for keyword, points in (
+            ("nau8821", 100),
+            ("sof", 60),
+            ("pci-", 40),
+            ("platform-", 30),
+            ("internal", 80),
+            ("built-in", 80),
+            ("analog", 20),
+        ):
+            if keyword in lower:
+                score += points
 
-        # The Steam Deck's physical internal mic source is an ALSA PCI input.
-        if self.INTERNAL_NAME_PATTERNS[0].match(name) or self.INTERNAL_NAME_PATTERNS[1].match(name):
-            if any(term in combined for term in self.INTERNAL_DEVICE_TERMS):
-                return True
+        # External devices are deliberately deprioritised.
+        for keyword, points in (
+            ("usb", -100),
+            ("bluez", -100),
+            ("bluetooth", -100),
+            ("headset", -60),
+        ):
+            if keyword in lower:
+                score += points
 
-        return False
+        return score
 
     def _find_internal_microphone(self) -> Optional[str]:
-        # Use JSON because it exposes the human-readable source/device
-        # descriptions that distinguish the Deck's internal mic from other
-        # inputs and virtual PipeWire sources.
-        try:
-            output = self._run_pactl("-f", "json", "list", "sources")
-            sources = self._parse_sources_json(output)
-
-            for source in sources:
-                if self._looks_like_internal_mic(source):
-                    name = source.get("name")
-                    if isinstance(name, str) and name:
-                        decky.logger.info(
-                            f"Detected Steam Deck internal microphone: {name}"
-                        )
-                        return name
-        except Exception as exc:
-            decky.logger.warning(f"JSON microphone detection failed: {exc}")
-
-        # Fallback for older pactl builds without JSON support.
         output = self._run_pactl("list", "sources", "short")
-        sources = self._parse_sources_short(output)
+        sources = self._parse_sources(output)
 
-        for source in sources:
-            name = source["name"]
-            if any(pattern.match(name) for pattern in self.INTERNAL_NAME_PATTERNS):
-                lowered = name.lower()
-                if any(term in lowered for term in self.INTERNAL_DEVICE_TERMS):
-                    decky.logger.info(
-                        f"Detected Steam Deck internal microphone (fallback): {name}"
-                    )
-                    return name
+        candidates = [
+            source["name"]
+            for source in sources
+            if self._source_is_candidate(source["name"])
+        ]
 
-        return None
+        if not candidates:
+            decky.logger.error(
+                "No microphone candidates found. pactl sources: " + output.strip()
+            )
+            return None
+
+        candidates.sort(key=self._candidate_score, reverse=True)
+        selected = candidates[0]
+
+        decky.logger.info(
+            f"Microphone candidates: {candidates}; selected: {selected}"
+        )
+        return selected
 
     def _source_exists(self, source: str) -> bool:
         output = self._run_pactl("list", "sources", "short")
         return any(
             entry["name"] == source
-            for entry in self._parse_sources_short(output)
+            for entry in self._parse_sources(output)
         )
 
     def _get_mute_state(self, source: str) -> bool:
         output = self._run_pactl("get-source-mute", source).strip().lower()
-
         if output.endswith("yes"):
             return True
-
         if output.endswith("no"):
             return False
-
         raise RuntimeError(f"Unexpected pactl mute response: {output}")
 
     async def get_status(self) -> Dict[str, Any]:
-        """Return the current internal microphone and mute state."""
         async with self._lock:
             try:
                 source = self._selected_source
-
                 if source is None or not self._source_exists(source):
                     source = self._find_internal_microphone()
 
                 if source is None:
                     return {
                         "success": False,
-                        "error": "Could not find the Steam Deck internal microphone.",
+                        "error": "Could not find a microphone input. Open Re-detect Microphone and check Decky logs for the available sources.",
                         "source": None,
                         "muted": None,
+                        "version": self.VERSION,
                     }
 
                 self._selected_source = source
                 self._save_selected_source(source)
-
                 muted = self._get_mute_state(source)
 
                 return {
@@ -265,6 +197,7 @@ class Plugin:
                     "error": None,
                     "source": source,
                     "muted": muted,
+                    "version": self.VERSION,
                 }
             except Exception as exc:
                 decky.logger.error(f"Failed to get microphone status: {exc}")
@@ -273,34 +206,32 @@ class Plugin:
                     "error": str(exc),
                     "source": self._selected_source,
                     "muted": None,
+                    "version": self.VERSION,
                 }
 
     async def set_muted(self, muted: bool) -> Dict[str, Any]:
-        """Set the mute state of the Steam Deck's internal microphone."""
         async with self._lock:
             try:
                 source = self._selected_source
-
                 if source is None or not self._source_exists(source):
                     source = self._find_internal_microphone()
 
                 if source is None:
                     return {
                         "success": False,
-                        "error": "Could not find the Steam Deck internal microphone.",
+                        "error": "Could not find a microphone input.",
                         "source": None,
                         "muted": None,
+                        "version": self.VERSION,
                     }
 
                 self._selected_source = source
                 self._save_selected_source(source)
-
                 self._run_pactl(
                     "set-source-mute",
                     source,
                     "1" if muted else "0",
                 )
-
                 actual_state = self._get_mute_state(source)
 
                 return {
@@ -308,6 +239,7 @@ class Plugin:
                     "error": None,
                     "source": source,
                     "muted": actual_state,
+                    "version": self.VERSION,
                 }
             except Exception as exc:
                 decky.logger.error(f"Failed to set microphone mute: {exc}")
@@ -316,13 +248,10 @@ class Plugin:
                     "error": str(exc),
                     "source": self._selected_source,
                     "muted": None,
+                    "version": self.VERSION,
                 }
 
     async def refresh(self) -> Dict[str, Any]:
-        """Forget the cached source and detect the internal microphone again."""
-        # Do not hold the lock while calling get_status(), because get_status()
-        # acquires the same asyncio.Lock.
         async with self._lock:
             self._selected_source = None
-
         return await self.get_status()
